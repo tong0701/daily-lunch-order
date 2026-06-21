@@ -1,0 +1,51 @@
+schedule:
+  order_times:
+    - "12:00"
+  timezone: "America/New_York"
+  days:
+    - monday
+    - tuesday
+    - wednesday
+    - thursday
+    - friday
+  paused: false
+  pause_until: null
+
+ordering_platform: mock
+
+budget:
+  max_usd: 18.00
+  approved_overage_usd: 3.00
+
+cuisine_ranking:
+  - japanese
+  - mediterranean
+  - thai
+  - american
+  - indian
+
+allergens_hard:
+  - shellfish
+  - peanuts
+
+no_go:
+  - liver
+
+dislikes_soft:
+  - spicy
+  - fried
+
+favorites:
+  - salmon poke bowl
+  - chicken shawarma plate
+
+fallback_foods:
+  - turkey sandwich
+  - garden salad
+  - veggie wrap
+  - falafel wrap
+
+confirmation:
+  lead_time_min: 5
+  reminder_interval_min: 10
+  auto_order_on_no_response: true
