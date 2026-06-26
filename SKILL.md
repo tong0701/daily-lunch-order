@@ -34,12 +34,12 @@ Follow these steps in order. They match `src/agent.py`.
 
 2. **Load config and history.** Read and validate `user_preferences.yaml`. Read `data/state.json`.
 
-3. **Build candidates.** Search the provider menu (`ordering_platform` maps to `src/provider.py`).
+3. **Build candidates.** Search the provider menu (`ordering_platform`: `mock`, `osm`, `yelp`, or `uber`).
    - Hard filter: drop items over `budget.max_usd + budget.approved_overage_usd`; drop hard allergens, `no_go`, and `do_not_show_again`; drop items whose allergen status is not confirmed; drop sides and drinks (only `main` items can be the lunch pick); drop items matching `fallback_foods` (reserved for the fallback ladder).
-   - Rank survivors by `cuisine_ranking`, `favorites`, `dislikes_soft`, recent variety, and base-budget bonus.
+   - Rank survivors by distance, Google rating (when enabled), cuisine preference (light tie-breaker), `favorites`, `dislikes_soft`, personal ratings, recent variety, and base-budget bonus.
    - Pick one option from the top three with weighted randomness.
 
-4. **Confirm.** About `confirmation.lead_time_min` before `order_times`, present one main dish with three actions: `order_it`, `show_another`, `not_today`. On no response, remind once after `reminder_interval_min`; if still no response and `auto_order_on_no_response` is true, place the order.
+4. **Confirm.** About `confirmation.lead_time_min` before `order_times`, present one main dish. With `LUNCH_AGENT_CONFIRMATION=discord`, post one card to Discord and wait for `1` / `2` / `3`. With the default mock path, use `--once --response`. On no response, remind once after `reminder_interval_min`; if still no response and `auto_order_on_no_response` is true, place the order.
 
 5. **Place order.** Use idempotency key `lunch-order-YYYY-MM-DD`. Call `place_order`, then `get_order_status`.
 
@@ -136,6 +136,9 @@ python src/agent.py --onboard
 
 # Simulated day (user-facing output)
 python src/agent.py --once
+
+# Live demo (OSM + Google + Discord; skips schedule guard)
+python src/agent.py --demo
 
 # Simulated day with engine trace
 python src/agent.py --once --verbose
