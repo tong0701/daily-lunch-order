@@ -498,13 +498,15 @@ def print_user_outcome(outcome: DayOutcome) -> None:
     if confirmation_backend() == "discord":
         from discord_confirm import notify_discord
 
-        if outcome.status == "skipped":
+        if outcome.status == "ordered":
+            target = outcome.restaurant or outcome.item_name
+            notify_discord(f"✅ Locked in **{target}** — DoorDash link above 👆")
+        elif outcome.status == "skipped":
             notify_discord("⏭️ Skipped for today.")
         elif outcome.status == "needs-verification":
             notify_discord(outcome.message or "Please verify your order in the delivery app.")
         elif outcome.status == "failed":
             notify_discord(outcome.message or "Could not place lunch order today.")
-        # ordered: no follow-up — replying `1` on the card is the confirmation.
 
 
 @dataclass
