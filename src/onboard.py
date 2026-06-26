@@ -90,7 +90,7 @@ def main() -> None:
     lunch_time = ask_lunch_time("12:00")
     lead = ask("How many minutes before lunch should I check in?", "5")
     lead = lead if lead.isdigit() else "5"
-    timezone = ask("Timezone?", "America/New_York")
+    timezone = ask("Timezone?", "America/Los_Angeles")
 
     print()
     budget_max = ask("Max price per lunch (USD)?", "18")

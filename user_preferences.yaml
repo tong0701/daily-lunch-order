@@ -1,7 +1,7 @@
 schedule:
   order_times:
     - "12:00"
-  timezone: "America/New_York"
+  timezone: "America/Los_Angeles"
   days:
     - monday
     - tuesday
@@ -11,18 +11,22 @@ schedule:
   paused: false
   pause_until: null
 
-ordering_platform: mock
+ordering_platform: osm
 
 budget:
   max_usd: 18.00
   approved_overage_usd: 3.00
 
 cuisine_ranking:
-  - japanese
+  - american
   - mediterranean
   - thai
-  - american
+  - mexican
+  - chinese
   - indian
+  - vietnamese
+  - korean
+  - japanese
 
 allergens_hard:
   - shellfish

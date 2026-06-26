@@ -16,6 +16,7 @@ from agent import (
     guard_exit,
     idempotency_key,
     run_agent,
+    score_item,
 )
 from config import ConfigError, validate_preferences
 from menu_matcher import keyword_match_allergens, llm_match_allergens
@@ -316,3 +317,78 @@ class TestLlmAllergenMatching:
             [turkey], prefs, empty_state(), llm_match_allergens
         )
         assert candidates == []
+
+
+class TestRankingSignals:
+    def test_distance_and_hours_bonus(self):
+        item = MenuItem(
+            id="rank-1",
+            name="Lunch at Nearby Spot",
+            restaurant="Nearby Spot",
+            cuisine="thai",
+            price_usd=15.0,
+            description="dist_m=180 | hours_listed=yes",
+        )
+        candidate = score_item(item, sample_prefs(), empty_state())
+        assert "distance <=200m +20" in candidate.reasons
+        assert "hours listed +5" in candidate.reasons
+
+    def test_recent_restaurant_penalty(self):
+        state = empty_state()
+        state["days"]["2026-06-25"] = {
+            "status": "ordered",
+            "restaurant": "Kobe",
+            "cuisine": "japanese",
+            "item_name": "Lunch at Kobe",
+        }
+        item = MenuItem(
+            id="rank-2",
+            name="Lunch at Kobe",
+            restaurant="Kobe",
+            cuisine="japanese",
+            price_usd=15.0,
+            description="dist_m=300",
+        )
+        candidate = score_item(item, sample_prefs(), state)
+        assert "recent restaurant -20" in candidate.reasons
+        assert "recent cuisine -8" in candidate.reasons
+
+    def test_personal_thumbs_up_bonus(self):
+        state = empty_state()
+        state["ratings"]["Lunch at Kobe"] = [{"rating": "up"}]
+        item = MenuItem(
+            id="rank-3",
+            name="Lunch at Kobe",
+            restaurant="Kobe",
+            cuisine="japanese",
+            price_usd=15.0,
+        )
+        candidate = score_item(item, sample_prefs(), state)
+        assert "personal thumbs up +25" in candidate.reasons
+
+
+class TestConfirmationLoop:
+    def test_repeated_show_another_keeps_re_picking(self, monkeypatch):
+        responses = iter(["show_another", "show_another", "order_it"])
+        calls = []
+
+        def fake_confirmation(pick, prefs, verbose, user_output, simulated_response, discovery_report=""):
+            calls.append(pick.item.id)
+            return next(responses)
+
+        monkeypatch.setattr("agent.run_confirmation", fake_confirmation)
+
+        provider = MockProvider()
+        state = empty_state()
+        outcome = run_agent(
+            provider=provider,
+            prefs=sample_prefs(),
+            state=state,
+            when=monday_noon(),
+            simulated_response=None,
+            skip_schedule_check=True,
+        )
+
+        assert outcome.status == "ordered"
+        assert len(calls) == 3
+        assert len(set(calls)) == 3

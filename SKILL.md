@@ -67,7 +67,7 @@ All user settings live in `user_preferences.yaml`. Each field is marked as a **h
 
 | Field | Type | Limit | Description |
 |-------|------|-------|-------------|
-| `ordering_platform` | string | hard | Provider name (`mock` in this repo). |
+| `ordering_platform` | string | hard | Provider name: `mock` (default), `uber`, `yelp`, or `osm`. |
 
 ### budget
 

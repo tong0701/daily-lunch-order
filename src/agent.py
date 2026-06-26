@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -15,6 +17,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from config import ConfigError, validate_preferences
+from env_loader import load_project_env
 from menu_matcher import get_allergen_checker, keyword_match_no_go
 from provider import MenuItem, Provider, get_provider
 
@@ -48,6 +51,8 @@ class DayOutcome:
     user_response: str | None = None
     order_id: str | None = None
     message: str = ""
+    restaurant: str | None = None
+    cuisine: str | None = None
 
 
 def load_preferences(path: Path = PREFS_PATH) -> dict[str, Any]:
@@ -166,6 +171,138 @@ def recent_item_names(state: dict[str, Any], lookback_days: int = 5) -> set[str]
     return recent
 
 
+def _record_restaurant_name(record: dict[str, Any]) -> str | None:
+    if record.get("restaurant"):
+        return str(record["restaurant"]).lower()
+    item_name = str(record.get("item_name", ""))
+    prefix = "lunch at "
+    if item_name.lower().startswith(prefix):
+        return item_name[len(prefix) :].lower()
+    return None
+
+
+def recent_restaurant_names(state: dict[str, Any], lookback_days: int = 3) -> set[str]:
+    cutoff = date.today() - timedelta(days=lookback_days)
+    recent: set[str] = set()
+    for day_str, record in sorted(state.get("days", {}).items(), reverse=True):
+        try:
+            day = date.fromisoformat(day_str)
+        except ValueError:
+            continue
+        if day < cutoff:
+            break
+        if record.get("status") != "ordered":
+            continue
+        name = _record_restaurant_name(record)
+        if name:
+            recent.add(name)
+    return recent
+
+
+def recent_cuisines(state: dict[str, Any], lookback_days: int = 3) -> set[str]:
+    cutoff = date.today() - timedelta(days=lookback_days)
+    recent: set[str] = set()
+    for day_str, record in sorted(state.get("days", {}).items(), reverse=True):
+        try:
+            day = date.fromisoformat(day_str)
+        except ValueError:
+            continue
+        if day < cutoff:
+            break
+        if record.get("status") == "ordered" and record.get("cuisine"):
+            recent.add(str(record["cuisine"]).lower())
+    return recent
+
+
+def parse_item_metadata(description: str) -> dict[str, str]:
+    """Parse key=value metadata embedded in menu item descriptions."""
+    meta: dict[str, str] = {}
+    for part in description.split("|"):
+        part = part.strip()
+        if "=" not in part or part.startswith("http") or part.startswith("OSM:"):
+            continue
+        key, value = part.split("=", 1)
+        meta[key.strip()] = value.strip()
+    return meta
+
+
+def distance_score(distance_meters: float | None) -> tuple[float, str | None]:
+    if distance_meters is None:
+        return 0.0, None
+    if distance_meters <= 200:
+        return 20.0, "distance <=200m +20"
+    if distance_meters <= 400:
+        return 12.0, "distance <=400m +12"
+    if distance_meters <= 600:
+        return 6.0, "distance <=600m +6"
+    return 0.0, None
+
+
+def personal_history_score(
+    item: MenuItem, state: dict[str, Any]
+) -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    score = 0.0
+    restaurant = item.restaurant.lower()
+    name_lower = item.name.lower()
+
+    for rated_item, entries in state.get("ratings", {}).items():
+        rated_lower = rated_item.lower()
+        matches = (
+            rated_lower == name_lower
+            or restaurant in rated_lower
+            or rated_lower in restaurant
+        )
+        if not matches or not entries:
+            continue
+        ups = sum(1 for entry in entries if entry.get("rating") == "up")
+        downs = sum(1 for entry in entries if entry.get("rating") == "down")
+        if ups > downs:
+            score += 25
+            reasons.append("personal thumbs up +25")
+        elif downs > 0 and entries[-1].get("rating") == "down":
+            score -= 30
+            reasons.append("personal thumbs down -30")
+
+    return score, reasons
+
+
+def source_quality_score(description: str) -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    score = 0.0
+    meta = parse_item_metadata(description)
+
+    if meta.get("hours_listed") == "yes":
+        score += 5
+        reasons.append("hours listed +5")
+
+    rating_raw = meta.get("google_rating")
+    if rating_raw:
+        try:
+            rating = float(rating_raw)
+        except ValueError:
+            rating = 0.0
+        if rating >= 4.5:
+            score += 10
+            reasons.append("google rating >=4.5 +10")
+        elif rating >= 4.0:
+            score += 5
+            reasons.append("google rating >=4.0 +5")
+
+    michelin = meta.get("michelin", "")
+    if michelin:
+        try:
+            stars = int(float(michelin))
+        except ValueError:
+            stars = 0
+        if stars > 0:
+            bonus = 15 * stars
+            score += bonus
+            reasons.append(f"michelin stars +{bonus}")
+
+    return score, reasons
+
+
 def state_no_go(state: dict[str, Any]) -> list[str]:
     return list(state.get("do_not_show_again", []))
 
@@ -177,8 +314,10 @@ def score_item(item: MenuItem, prefs: dict[str, Any], state: dict[str, Any]) -> 
     cuisine_rank = [c.lower() for c in prefs.get("cuisine_ranking", [])]
     if item.cuisine.lower() in cuisine_rank:
         rank_score = len(cuisine_rank) - cuisine_rank.index(item.cuisine.lower())
-        score += rank_score * 10
-        reasons.append(f"cuisine rank +{rank_score * 10}")
+        # Soft tie-breaker only — distance, rating, and budget matter more.
+        bonus = min(12, rank_score * 2)
+        score += bonus
+        reasons.append(f"cuisine rank +{bonus}")
 
     favorites = [f.lower() for f in prefs.get("favorites", [])]
     name_lower = item.name.lower()
@@ -198,7 +337,37 @@ def score_item(item: MenuItem, prefs: dict[str, Any], state: dict[str, Any]) -> 
     recent = recent_item_names(state)
     if name_lower in recent:
         score -= 20
-        reasons.append("recent variety -20")
+        reasons.append("recent item -20")
+
+    restaurant_lower = item.restaurant.lower()
+    if restaurant_lower in recent_restaurant_names(state):
+        score -= 20
+        reasons.append("recent restaurant -20")
+
+    if item.cuisine.lower() in recent_cuisines(state):
+        score -= 8
+        reasons.append("recent cuisine -8")
+
+    meta = parse_item_metadata(item.description)
+    dist_raw = meta.get("dist_m")
+    distance_meters: float | None = None
+    if dist_raw and dist_raw != "unknown":
+        try:
+            distance_meters = float(dist_raw)
+        except ValueError:
+            distance_meters = None
+    dist_bonus, dist_reason = distance_score(distance_meters)
+    if dist_reason:
+        score += dist_bonus
+        reasons.append(dist_reason)
+
+    quality_bonus, quality_reasons = source_quality_score(item.description)
+    score += quality_bonus
+    reasons.extend(quality_reasons)
+
+    history_bonus, history_reasons = personal_history_score(item, state)
+    score += history_bonus
+    reasons.extend(history_reasons)
 
     budget_max = float(prefs["budget"]["max_usd"])
     if item.price_usd <= budget_max:
@@ -271,7 +440,7 @@ def notify_user(message: str) -> None:
 
 
 def write_day_outcome(state: dict[str, Any], day: str, outcome: DayOutcome) -> None:
-    state.setdefault("days", {})[day] = {
+    record: dict[str, Any] = {
         "status": outcome.status,
         "item_name": outcome.item_name,
         "price_usd": outcome.price_usd,
@@ -280,26 +449,62 @@ def write_day_outcome(state: dict[str, Any], day: str, outcome: DayOutcome) -> N
         "message": outcome.message,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    if outcome.restaurant:
+        record["restaurant"] = outcome.restaurant
+    if outcome.cuisine:
+        record["cuisine"] = outcome.cuisine
+    state.setdefault("days", {})[day] = record
     save_state(state)
 
 
-def print_suggestion(pick: Candidate, prefs: dict[str, Any]) -> None:
-    lead = prefs["confirmation"]["lead_time_min"]
-    print(f"\nLunch in about {lead} minutes")
-    print(f"{pick.item.name} from {pick.item.restaurant}  ${pick.item.price_usd:.2f}")
-    print("\nReply: order_it  |  show_another  |  not_today")
+def format_confirmation_card(
+    pick: Candidate,
+    prefs: dict[str, Any],
+    discovery_report: str = "",
+) -> str:
+    from discord_confirm import format_lunch_message
+
+    lead = int(prefs["confirmation"]["lead_time_min"])
+    return format_lunch_message(
+        pick.item.name,
+        pick.item.restaurant,
+        pick.item.price_usd,
+        lead,
+        place_url=extract_place_url(pick.item.description),
+        recommendation_details=recommendation_details(pick),
+        discovery_preamble=discovery_report,
+    )
+
+
+def print_suggestion(
+    pick: Candidate,
+    prefs: dict[str, Any],
+    discovery_report: str = "",
+) -> None:
+    print(f"\n{format_confirmation_card(pick, prefs, discovery_report)}")
 
 
 def print_user_outcome(outcome: DayOutcome) -> None:
     if outcome.status == "ordered":
         price = f"${outcome.price_usd:.2f}" if outcome.price_usd is not None else ""
-        print(f"\nOrder placed: {outcome.item_name}  {price}".rstrip())
+        print(f"\nSelected: {outcome.item_name}  {price}".rstrip())
     elif outcome.status == "skipped":
         print("\nNo order placed for today.")
     elif outcome.status == "needs-verification":
         print(f"\n{outcome.message}")
     elif outcome.status == "failed":
         print(f"\n{outcome.message}")
+
+    if confirmation_backend() == "discord":
+        from discord_confirm import notify_discord
+
+        if outcome.status == "skipped":
+            notify_discord("⏭️ Skipped for today.")
+        elif outcome.status == "needs-verification":
+            notify_discord(outcome.message or "Please verify your order in the delivery app.")
+        elif outcome.status == "failed":
+            notify_discord(outcome.message or "Could not place lunch order today.")
+        # ordered: no follow-up — replying `1` on the card is the confirmation.
 
 
 @dataclass
@@ -322,19 +527,135 @@ def try_place_order(
     return OrderResultWrapper(result=result, status=status)
 
 
+def confirmation_backend() -> str:
+    """Return confirmation backend: simulate (default) or discord."""
+    return os.getenv("LUNCH_AGENT_CONFIRMATION", "simulate").lower()
+
+
+def simulated_response_for_run(explicit: str | None) -> str | None:
+    """Choose simulated_response for run_agent based on env and CLI."""
+    if explicit is not None:
+        return explicit
+    if confirmation_backend() == "discord":
+        return None
+    return "order_it"
+
+
+def extract_place_url(description: str) -> str:
+    """Google Maps, OSM, or Yelp link embedded in menu item description."""
+    try:
+        from osm_provider import extract_google_maps_url, extract_osm_url
+
+        url = extract_google_maps_url(description)
+        if url:
+            return url
+        url = extract_osm_url(description)
+        if url:
+            return url
+    except ImportError:
+        pass
+    try:
+        from yelp_provider import extract_yelp_url
+
+        return extract_yelp_url(description)
+    except ImportError:
+        return ""
+
+
+def _humanize_reasons(reasons: list[str]) -> list[str]:
+    """Turn internal score reasons into short user-friendly phrases."""
+    friendly: list[str] = []
+    for reason in reasons:
+        if reason.startswith("favorite match"):
+            friendly.append("one of your favorites")
+        elif reason.startswith("cuisine rank"):
+            friendly.append("cuisine you like")
+        elif reason.startswith("distance <=200"):
+            friendly.append("very close")
+        elif reason.startswith("distance <=400"):
+            friendly.append("close by")
+        elif reason.startswith("distance <=600"):
+            friendly.append("nearby")
+        elif reason.startswith("google rating >=4.5"):
+            friendly.append("highly rated")
+        elif reason.startswith("google rating >=4.0"):
+            friendly.append("well rated")
+        elif reason.startswith("under base budget"):
+            friendly.append("within budget")
+        elif reason.startswith("michelin"):
+            friendly.append("Michelin pick")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for phrase in friendly:
+        if phrase not in seen:
+            seen.add(phrase)
+            ordered.append(phrase)
+    return ordered[:3]
+
+
+def recommendation_details(pick: Candidate) -> list[str]:
+    """Clean, scannable recommendation card lines (facts, then links)."""
+    item = pick.item
+    meta = parse_item_metadata(item.description)
+    lines: list[str] = []
+
+    facts: list[str] = []
+    dist = meta.get("dist_m")
+    if dist and dist != "unknown":
+        try:
+            meters = int(float(dist))
+            facts.append(f"{meters / 1000:.1f} km" if meters >= 1000 else f"{meters} m")
+        except ValueError:
+            pass
+
+    rating = meta.get("google_rating")
+    reviews = meta.get("google_reviews")
+    if rating:
+        review_text = f" ({reviews})" if reviews else ""
+        facts.append(f"\u2b50 {rating}{review_text}")
+    if facts:
+        lines.append("\U0001f4cd " + "   \u00b7   ".join(facts))
+
+    price_text = f"~${item.price_usd:.0f}/person"
+    price_source = meta.get("price_source", "estimated")
+    if price_source == "google" or meta.get("google_price_level"):
+        lines.append(f"\U0001f4b5 {price_text}")
+    else:
+        lines.append(f"\U0001f4b5 {price_text} (est.)")
+
+    why = _humanize_reasons(pick.reasons)
+    if why:
+        lines.append("\u2728 " + " \u00b7 ".join(why))
+
+    from order_links import build_doordash_search_url, extract_doordash_url, extract_google_maps_url
+
+    lines.append("")
+    doordash = extract_doordash_url(item.description) or build_doordash_search_url(
+        item.restaurant
+    )
+    lines.append(f"\U0001f6d2 **Order on DoorDash:** {doordash}")
+    maps = extract_google_maps_url(item.description)
+    if maps:
+        lines.append(f"\U0001f5fa\ufe0f Map: {maps}")
+    return lines
+
+
 def run_confirmation(
     pick: Candidate,
     prefs: dict[str, Any],
     verbose: bool,
     user_output: bool,
     simulated_response: str | None = "order_it",
+    discovery_report: str = "",
 ) -> str:
     lead = prefs["confirmation"]["lead_time_min"]
     reminder = prefs["confirmation"]["reminder_interval_min"]
     auto = prefs["confirmation"]["auto_order_on_no_response"]
 
-    if user_output:
-        print_suggestion(pick, prefs)
+    use_discord = confirmation_backend() == "discord" and simulated_response is None
+
+    if user_output and not use_discord:
+        print_suggestion(pick, prefs, discovery_report)
 
     if verbose:
         print(
@@ -353,6 +674,21 @@ def run_confirmation(
         if verbose:
             print(f"  Simulated user response: {simulated_response}")
         return simulated_response
+
+    if confirmation_backend() == "discord":
+        from discord_confirm import wait_for_discord_response
+
+        return wait_for_discord_response(
+            pick.item.name,
+            pick.item.restaurant,
+            pick.item.price_usd,
+            prefs,
+            verbose=verbose,
+            user_output=user_output,
+            place_url=extract_place_url(pick.item.description),
+            discovery_report=discovery_report,
+            recommendation_details=recommendation_details(pick),
+        )
 
     return "order_it"
 
@@ -384,6 +720,18 @@ def run_agent(
 
     provider = provider or get_provider(prefs.get("ordering_platform", "mock"))
     allergen_checker = get_allergen_checker()
+    if hasattr(provider, "run_discovery"):
+        provider.run_discovery(when)
+    discovery_report = getattr(provider, "last_discovery_report", "")
+    discovery_discord = (
+        getattr(provider, "last_discovery_discord_report", None) or discovery_report
+    )
+    if verbose and discovery_report:
+        print(discovery_report)
+        print()
+    elif user_output and discovery_discord and confirmation_backend() != "discord":
+        print(discovery_discord)
+        print()
     menu = provider.search_menu()
 
     if verbose:
@@ -415,7 +763,7 @@ def run_agent(
         )
 
     action = run_confirmation(
-        pick, prefs, verbose, user_output, simulated_response
+        pick, prefs, verbose, user_output, simulated_response, discovery_discord
     )
     if action == "not_today":
         outcome = DayOutcome(
@@ -447,7 +795,9 @@ def run_agent(
                 print(f"RE-PICK: {pick.item.name}")
             if user_output:
                 print("\nAnother option:")
-            action = run_confirmation(pick, prefs, verbose, user_output, "order_it")
+            action = run_confirmation(
+                pick, prefs, verbose, user_output, simulated_response
+            )
             if action == "not_today":
                 outcome = DayOutcome(
                     status="skipped",
@@ -460,6 +810,8 @@ def run_agent(
                 if user_output:
                     print_user_outcome(outcome)
                 return outcome
+            if action == "show_another":
+                continue
 
         if action in {"order_it", "no_response"}:
             outcome = place_with_failure_ladder(
@@ -524,6 +876,8 @@ def place_with_failure_ladder(
                     user_response=user_response,
                     order_id=wrapped.result.order_id,
                     message=msg,
+                    restaurant=item.restaurant,
+                    cuisine=item.cuisine,
                 )
                 write_day_outcome(state, day, outcome)
                 if verbose:
@@ -537,6 +891,8 @@ def place_with_failure_ladder(
                 user_response=user_response,
                 order_id=wrapped.result.order_id,
                 message=wrapped.result.message,
+                restaurant=item.restaurant,
+                cuisine=item.cuisine,
             )
             write_day_outcome(state, day, outcome)
             if verbose:
@@ -703,11 +1059,17 @@ def weekly_summary(state: dict[str, Any] | None = None, days: int = 7) -> str:
 
 
 def main() -> None:
+    load_project_env()
     parser = argparse.ArgumentParser(description="Daily lunch ordering agent")
     parser.add_argument(
         "--once",
         action="store_true",
         help="Run one simulated day with user-facing output",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run one live demo now (Discord, skip schedule/time guards)",
     )
     parser.add_argument(
         "--verbose",
@@ -764,6 +1126,24 @@ def main() -> None:
         return
 
     try:
+        if args.demo:
+            prefs = load_preferences()
+            state = load_state()
+            tz = ZoneInfo(prefs["schedule"]["timezone"])
+            when = datetime.now(tz)
+            day = when.date().isoformat()
+            state.get("days", {}).pop(day, None)
+            save_state(state)
+            print(f"Demo run for {day} ({tz.key}) — reply in Discord: 1=order, 2=another, 3=skip")
+            run_agent(
+                when=when,
+                verbose=args.verbose,
+                user_output=True,
+                simulated_response=None,
+                skip_schedule_check=True,
+            )
+            return
+
         if args.once:
             prefs = load_preferences()
             state = load_state()
@@ -784,7 +1164,7 @@ def main() -> None:
             )
             return
 
-        outcome = run_agent(verbose=args.verbose)
+        outcome = run_agent(verbose=args.verbose, simulated_response=simulated_response_for_run(None))
         if outcome.message:
             print(outcome.message)
         else:

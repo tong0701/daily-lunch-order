@@ -329,6 +329,21 @@ PROVIDERS: dict[str, type[Provider]] = {
 
 def get_provider(name: str, **kwargs: Any) -> Provider:
     """Instantiate a provider by config name."""
+    if name == "uber":
+        from uber_provider import UberEatsProvider, build_uber_provider
+
+        PROVIDERS.setdefault("uber", UberEatsProvider)
+        return build_uber_provider(**kwargs)
+    if name == "yelp":
+        from yelp_provider import YelpDiscoveryProvider, build_yelp_provider
+
+        PROVIDERS.setdefault("yelp", YelpDiscoveryProvider)
+        return build_yelp_provider(**kwargs)
+    if name == "osm":
+        from osm_provider import OsmDiscoveryProvider, build_osm_provider
+
+        PROVIDERS.setdefault("osm", OsmDiscoveryProvider)
+        return build_osm_provider(**kwargs)
     if name not in PROVIDERS:
         raise ValueError(f"Unknown provider: {name}")
     return PROVIDERS[name](**kwargs)
