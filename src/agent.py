@@ -1166,7 +1166,11 @@ def main() -> None:
             )
             return
 
-        outcome = run_agent(verbose=args.verbose, simulated_response=simulated_response_for_run(None))
+        outcome = run_agent(
+            verbose=args.verbose,
+            user_output=confirmation_backend() == "discord",
+            simulated_response=simulated_response_for_run(None),
+        )
         if outcome.message:
             print(outcome.message)
         else:
