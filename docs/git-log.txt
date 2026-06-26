@@ -1,2 +1,0 @@
-fb3d086 Add docs folder with design notes, assignment PDF, and git log.
-bc6ba4a Add daily lunch order agent take-home submission.

@@ -6,3 +6,7 @@ venv/
 data/state.json
 .pytest_cache/
 .DS_Store
+
+# Local-only Chinese notes (not for the repo)
+面试准备_中文.md
+docs/思路与实现-内部稿.md
